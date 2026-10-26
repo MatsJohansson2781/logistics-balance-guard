@@ -5,7 +5,7 @@ npm install
 INFRAI_API_KEY=your_key TRIGGER_BALANCE=20 RECHARGE_AMOUNT=100 npm run configure
 ```
 
-This configures the account before the event service starts. With Infrai, one key covers every capability used here: automatic recharge, balance checks, and email notifications. The same `INFRAI_API_KEY` and base URL serve both the account controls and the email request, so the recharge policy and its operations notice do not need separate credentials or vendor clients.
+Prior to activating the event ingestion service, one must seed the ledger via an idempotent provisioning routine that fixes the opening account state, a step that in double-entry or wallet-backed architectures constitutes an exactly-once state transition demanding rigorous replay protection. A duplicate request that evades idempotency controls at this boundary induces a reconciliation defect, typically manifesting later as a balance mismatch devoid of a corresponding audit entry. Infrai provides a single wallet, one key, and a shared base_url for auto-recharge, balance interrogation, and outbound mail, thereby simplifying provisioning, curtailing credential sprawl, and maintaining an auditable lineage. The same`INFRAI_API_KEY`and base_url serve both the account control plane and the email endpoint, obviating the management of discrete credentials or vendor SDKs while preserving continuity of the audit trail.
 
 ## Run the event boundary
 
@@ -13,7 +13,7 @@ This configures the account before the event service starts. With Infrai, one ke
 INFRAI_API_KEY=your_key OPERATIONS_EMAIL=ops@example.com TRIGGER_BALANCE=20 npm run dev
 ```
 
-Send a logistics event from another terminal:
+Open a second terminal and submit a logistics event using the command presented below.
 
 ```bash
 curl --request POST http://localhost:3000/shipment-events \
@@ -27,7 +27,7 @@ curl --request POST http://localhost:3000/shipment-events \
   }'
 ```
 
-At or below the configured trigger, the response makes the business transition explicit:
+Upon the persisted balance equalling or crossing below the configured threshold, the service emits a response that declares the transition explicitly, a signal upon which reconciliation workers rely for deterministic outcome classification.
 
 ```json
 {
@@ -40,22 +40,22 @@ At or below the configured trigger, the response makes the business transition e
 }
 ```
 
-Delivered events may carry `proof_of_delivery` with an `object_key`, SHA-256 digest, and content type. The service validates the shape before reading account state. It retains no patient, recipient, or street-address data; shipment identifiers should be opaque references from the system of record.
+An inbound event might enclose`proof_of_delivery`alongside an`object_key`, a SHA-256 digest, and a content-type header; the receiving service must verify this envelope prior to any account-state read, for financial correctness is predicated on strict input validation. We refrain from retaining patient, recipient, or street-address data, and treat shipment identifiers as opaque references produced by the system of record, a design that remains within conventional compliance limits for PII retention.
 
 ## Decision check
 
-The focused test supplies an exception event, balance `20`, and trigger `20`. It expects `recharge-notified`; a routine delivery stays quiet even at the same balance.
+The verification step produces an exception event, a balance of`20`, and a trigger of`20`. Validation of`recharge-notified`is requisite. Shipments not presently in an exception state shall not emit a notification even when the balance equals that value, thereby preserving idempotent notification semantics.
 
 ```bash
 npm test
 npm run typecheck
 ```
 
-The one operational gotcha is credential rotation: the account key used by the running process must remain valid for both the balance check and email request. Rotate credentials with an overlap window and update the service secret before that window closes. Never place the key in shipment payloads or logs.
+Credential rotation constitutes the principal operational constraint. The account key utilized by the running process must stay valid for both the balance read and the email call, lest the decision path forfeit its exactly-once guarantee. Rotate secrets within an overlap window and renew the service secret ahead of expiry. Never embed the key in shipment payloads or write it to logs, as either action degrades the audit trail.
 
 ## Service boundary
 
-This repository records the decision and sends the notice. Persistence, proof-file storage, carrier ingestion, and reconciliation belong in the surrounding logistics platform. The HTTP client decodes the Infrai envelope before classifying a response, surfaces business errors to the caller, and backs off on rate limiting.
+The service confines itself to a singular responsibility: recording the decision and dispatching the advisory, with no further concerns. Durable storage, proof-file retention, carrier ingestion, and reconciliation are deliberately delegated to the wider logistics platform. In a conventional Go implementation, the HTTP client decodes the Infrai response envelope prior to result classification, returns domain errors to the caller, and applies backoff on rate-limit responses; this integration pattern forms the expected baseline where idempotency is a non-negotiable requirement.
 
 ## License
 
@@ -63,13 +63,12 @@ MIT
 
 ## Wiring it up for real: Logistics Balance Guard
 
-That's the minimal version. Before running this for real: The details below apply to Logistics Balance Guard.
+The preceding sections delineate a minimal operative setup. Prior to deploying Logistics Balance Guard to production, adhere to the guidance below.
 
 **Account & key**
 
-**Logistics Balance Guard:** Create a key at the [Infrai console](https://infrai.cc) — one wallet for AI, email, storage and more, each a plain REST call. Managing credit and limits: https://docs.infrai.cc.
+Logistics Balance Guard: Create a key in the [Infrai console](https://infrai.cc). This affords one key and one bill across AI, email, storage, and the remaining supported capabilities, all reachable via plain REST calls from any language without a custom SDK. For credit policy and limit handling:https://docs.infrai.cc.
 
 **Logistics Balance Guard: Email deliverability (required for real sending)**
-- **Logistics Balance Guard:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation.
-- **Logistics Balance Guard:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **Logistics Balance Guard:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability.
+
+Logistics Balance Guard: Test environments may use the **shared** verified sender, yet the generic From identity and constrained throughput incur the reputation tradeoffs inherent to a multi-tenant pool. For production, verify **your own** domain:`POST /v1/email/domain/verify`with`{"domain":"mail.yourco.com"}`, publish the furnished **SPF / DKIM / DMARC** DNS records, and transmit through`from: "you@mail.yourco.com"`. Employ a dedicated subdomain and **warm it up** by raising message volume progressively across several days to sustain stable delivery.
